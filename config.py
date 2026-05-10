@@ -13,12 +13,13 @@ class Args:
     num_secret = 4
 
     # optimer config
-    lr = 2e-4
-    warm_up_epoch = 20
-    warm_up_lr_init = 5e-6
+    lr = 1e-3
+    lr_min = 1e-6
+    warm_up_epoch = 0
+    warm_up_lr_init = 1e-6
 
     # dataset
-    DIV2K_path = '/home/whq135/dataset'     # /home/whq135/dataset/DIV2K_train_HR
+    DIV2K_path = '/home/gsjsun24/StegFormer-master/StegFormer-master/Data'
     single_batch_size = 12
     multi_batch_szie = 8 
     multi_batch_iteration = (num_secret+1)*8
@@ -29,10 +30,11 @@ class Args:
     val_freq = 10
     save_freq = 200
     train_next = 0
-    use_model = 'StegFormer-B'
+    use_model = 'MambaStegFormer-B'
     input_dim = 3
     
     norm_train = 'clamp'
     output_act = None
-    path='/home/whq135/code/StegFormer'
-    model_name='StegFormer-B_4baseline'
+    path='/home/gsjsun24/StegFormer-master/StegFormer-master'
+    model_name='MambaStegFormer-B_1baseline'
+ 
