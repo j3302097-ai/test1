@@ -42,7 +42,7 @@ transform_A_test_256 = A.Compose([
     ToTensorV2()
 ])
 
-DIV2K_path = "/home/whq135/dataset"
+DIV2K_path = args.DIV2K_path
 Flickr2K_path = "/home/whq135/dataset/Flickr2K"
 
 batchsize = 12
