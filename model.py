@@ -226,6 +226,162 @@ class Channel_Adapter(nn.Module):
         return x
 
 
+
+@@ -204,50 +204,154 @@ class Channel_Adapter(nn.Module):
+
+
+    def __init__(self, num_channels, resolution):
+    def __init__(self, num_channels, resolution):
+        super().__init__()
+        super().__init__()
+        self.proj = nn.Sequential(
+        self.proj = nn.Sequential(
+            nn.Conv2d(num_channels, 4*num_channels, 1),
+            nn.Conv2d(num_channels, 4*num_channels, 1),
+            nn.GELU(),
+            nn.GELU(),
+            nn.Conv2d(4*num_channels, num_channels, 1)
+            nn.Conv2d(4*num_channels, num_channels, 1)
+        )
+        )
+        self.pool = nn.AvgPool2d(resolution)
+        self.pool = nn.AvgPool2d(resolution)
+        self.mlp = nn.Sequential(
+        self.mlp = nn.Sequential(
+            nn.Linear(num_channels, 4*num_channels),
+            nn.Linear(num_channels, 4*num_channels),
+            nn.Linear(4*num_channels, num_channels),
+            nn.Linear(4*num_channels, num_channels),
+            nn.Sigmoid()
+            nn.Sigmoid()
+        )
+        )
+
+
+    def forward(self, x):
+    def forward(self, x):
+        B, C, H, W = x.shape
+        B, C, H, W = x.shape
+        x_proj = self.proj(x)
+        x_proj = self.proj(x)
+        avg_x = self.pool(x_proj).reshape(B, C)   # (B,C)
+        avg_x = self.pool(x_proj).reshape(B, C)   # (B,C)
+        attn = self.mlp(avg_x)
+        attn = self.mlp(avg_x)
+        attn = attn.reshape(B, C, 1, 1)*x_proj
+        attn = attn.reshape(B, C, 1, 1)*x_proj
+        x = x+attn
+        x = x+attn
+        return x
+        return x
+
+
+
+
+class Mamba3MIMOChannelMixer(nn.Module):
+    """Lightweight Mamba3-MIMO style mixer for cover-secret channel matching.
+
+    It treats every channel as a token and scans the cover descriptor, secret
+    descriptor and their difference jointly to predict a per-channel hiding
+    strength.  The implementation intentionally avoids an external Mamba
+    dependency while keeping the MIMO channel sequence interface needed by the
+    steganography controller.
+    """
+
+    def __init__(self, num_channels, hidden_ratio=4, kernel_size=5):
+        super().__init__()
+        hidden_dim = max(num_channels // hidden_ratio, 8)
+        padding = kernel_size // 2
+        self.in_proj = nn.Linear(3, hidden_dim)
+        self.scan = nn.Conv1d(hidden_dim, hidden_dim, kernel_size, padding=padding, groups=hidden_dim)
+        self.gate = nn.Sequential(
+            nn.Linear(3, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid()
+        )
+        self.out_proj = nn.Linear(hidden_dim, 1)
+
+    def forward(self, cover_desc, secret_desc):
+        relation = torch.stack([cover_desc, secret_desc, cover_desc-secret_desc], dim=-1)
+        x = self.in_proj(relation)
+        scanned = self.scan(x.transpose(1, 2)).transpose(1, 2)
+        x = scanned*self.gate(relation)
+        return torch.sigmoid(self.out_proj(x).squeeze(-1))
+
+
+class SecretAwareChannelController(nn.Module):
+    """Secret-aware Channel Adapter for steganographic channel allocation.
+
+    Compared with the original Channel_Adapter, this controller can explicitly
+    compare cover and secret feature statistics and outputs the hiding strength
+    of every channel. If no cover/secret condition is supplied it falls back to
+    the original self-adaptive channel behavior, keeping backward compatibility.
+    """
+
+    def __init__(self, num_channels, resolution):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Conv2d(num_channels, 4*num_channels, 1),
+            nn.GELU(),
+            nn.Conv2d(4*num_channels, num_channels, 1)
+        )
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.self_mlp = nn.Sequential(
+            nn.Linear(num_channels, 4*num_channels),
+            nn.GELU(),
+            nn.Linear(4*num_channels, num_channels),
+            nn.Sigmoid()
+        )
+        self.cover_proj = nn.Linear(num_channels, num_channels)
+        self.secret_proj = nn.Linear(num_channels, num_channels)
+        self.mimo = Mamba3MIMOChannelMixer(num_channels)
+
+    def forward(self, x, cover_feat=None, secret_feat=None):
+        B, C, H, W = x.shape
+        x_proj = self.proj(x)
+        if cover_feat is None or secret_feat is None:
+            avg_x = self.pool(x_proj).reshape(B, C)
+            strength = self.self_mlp(avg_x)
+        else:
+            cover_desc = self.pool(cover_feat).reshape(B, C)
+            secret_desc = self.pool(secret_feat).reshape(B, C)
+            cover_desc = self.cover_proj(cover_desc)
+            secret_desc = self.secret_proj(secret_desc)
+            strength = self.mimo(cover_desc, secret_desc)
+        return x + strength.reshape(B, C, 1, 1)*x_proj
+
+
+class VMamba2DScan(nn.Module):
+    """VMamba-style two-dimensional scan for exchanging information across windows.
+
+    The block performs horizontal and vertical bidirectional selective scans
+    with lightweight cumulative state propagation, then gates the scanned state
+    before projecting it back to the feature space.
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.in_proj = nn.Conv2d(dim, dim*2, 1)
+        self.dwconv = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
+        self.out_proj = nn.Conv2d(dim, dim, 1)
+        self.act = nn.SiLU()
+
+    def _bidirectional_scan(self, x, dim):
+        length = x.shape[dim]
+        forward = torch.cumsum(x, dim=dim)
+        backward = torch.flip(torch.cumsum(torch.flip(x, dims=(dim,)), dim=dim), dims=(dim,))
+        return (forward + backward) / max(length, 1)
+
+    def forward(self, x):
+        value, gate = self.in_proj(x).chunk(2, dim=1)
+        value = self.dwconv(self.act(value))
+        horizontal = self._bidirectional_scan(value, dim=3)
+        vertical = self._bidirectional_scan(value, dim=2)
+        scanned = 0.5*(horizontal + vertical)
+        return self.out_proj(scanned*torch.sigmoid(gate))
+
+
 class PEG_Conv(nn.Module):
     """Conditional position encode generator, using depth-wise convolution
 
@@ -520,6 +676,13 @@ class Global_Enhanced_BottleNeck_Block(nn.Module):
         self.attn = ConditinoalAttention(
             dim, num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop, drop_key=drop_key)
+        self.mamba_scan = VMamba2DScan(dim)
+        self.conv_branch = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, 1, 1, groups=dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 1)
+        )
+        self.branch_fusion = nn.Conv2d(dim*3, dim, 1)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -534,10 +697,16 @@ class Global_Enhanced_BottleNeck_Block(nn.Module):
         B, L, C = x.shape
 
         shortcut = x
-        x = self.norm1(x)
+        x_norm = self.norm1(x)
 
-        # W-MSA/SW-MSA
-        x = self.attn(x)  # B, N, C
+        # Hybrid Mamba3-GEB: global self-attention + VMamba scan + local convolution.
+        attn_x = self.attn(x_norm)  # B, N, C
+        img_x = rearrange(x_norm, 'bs (h w) c -> bs c h w', bs=B, h=H, w=W).contiguous()
+        mamba_x = self.mamba_scan(img_x)
+        conv_x = self.conv_branch(img_x)
+        fused = self.branch_fusion(torch.cat([rearrange(attn_x, 'bs (h w) c -> bs c h w', bs=B, h=H, w=W).contiguous(),
+                                              mamba_x, conv_x], dim=1))
+        x = rearrange(fused, 'bs c h w -> bs (h w) c').contiguous()
 
         x = shortcut + self.drop_path(x)
 
@@ -696,21 +865,30 @@ class Channel_Adaptive_Transformer_Block(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, window_size, patch_size,
                  depth=2, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint=False,
-                 fused_window_process=False, drop_key=False):
+                 fused_window_process=False, drop_key=False, use_vmamba=False,
+                 use_secret_controller=False):
 
         super().__init__()
         self.transformer_block = Swin_Transformer(dim, to_2tuple(input_resolution), depth, num_heads, window_size, mlp_ratio, qkv_bias,
                                                   qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, fused_window_process, drop_key=drop_key)
-        self.CA = Channel_Adapter(dim//(patch_size**2), input_resolution*patch_size)
+        channel_dim = dim//(patch_size**2)
+        self.CA = SecretAwareChannelController(channel_dim, input_resolution*patch_size) if use_secret_controller else Channel_Adapter(channel_dim, input_resolution*patch_size)
+        self.vmamba_scan = VMamba2DScan(channel_dim) if use_vmamba else None
         self.patch_size = patch_size
         self.window_size = window_size
         self.input_resolution = input_resolution
+        self.use_secret_controller = use_secret_controller
 
-    def forward(self, x):
-        x = self.CA(x)  # 消融: CA
+    def forward(self, x, cover_feat=None, secret_feat=None):
+        if self.use_secret_controller:
+            x = self.CA(x, cover_feat, secret_feat)
+        else:
+            x = self.CA(x)  # 消融: CA
         x = PatchDivide(x, self.patch_size)
         x = self.transformer_block(x)
         x = PatchReverse(x, self.patch_size)
+        if self.vmamba_scan is not None:
+            x = x + self.vmamba_scan(x)
         return x
 
 
@@ -743,20 +921,22 @@ class CATB_Layer(nn.Module):
     def __init__(self, dim, input_resolution, num_heads, window_size, patch_size, depth=1,
                  depth_tr=2, mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint=False,
-                 fused_window_process=False, drop_key=False):
+                  fused_window_process=False, drop_key=False, use_vmamba=False,
+                 use_secret_controller=False):
 
         super().__init__()
         self.use_checkpoint = use_checkpoint
         self.blocks = nn.ModuleList([
             Channel_Adaptive_Transformer_Block(dim, input_resolution, num_heads, window_size, patch_size, depth_tr, mlp_ratio, qkv_bias,
-                                               qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, fused_window_process, drop_key)for i in range(depth)])
+                                              qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, fused_window_process, drop_key,
+                                               use_vmamba=use_vmamba, use_secret_controller=use_secret_controller)for i in range(depth)])
 
-    def forward(self, x):
+    def forward(self, x, cover_feat=None, secret_feat=None):
         for blk in self.blocks:
             if self.use_checkpoint:
-                x = checkpoint.checkpoint(blk, x)
+                x = checkpoint.checkpoint(blk, x, cover_feat, secret_feat)
             else:
-                x = blk(x)
+                x = blk(x, cover_feat, secret_feat)
         return x
 
 
@@ -791,7 +971,14 @@ class StegFormer(nn.Module):
         super().__init__()
         self.dim = cnn_emb_dim
         self.token_dim = (patch_size**2)*cnn_emb_dim
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.is_conceal_network = input_dim > output_dim and output_dim == 3
         self.embedding = nn.Conv2d(input_dim, self.dim, 3, 1, 1)
+        self.cover_embedding = nn.Conv2d(output_dim, self.dim, 3, 1, 1) if self.is_conceal_network else None
+        self.secret_embedding = nn.Conv2d(input_dim-output_dim, self.dim, 3, 1, 1) if self.is_conceal_network else None
+
         self.patch_size = patch_size
         self.patch_resolution = img_resolution//patch_size
         if output_act:
@@ -804,16 +991,26 @@ class StegFormer(nn.Module):
                                          window_size, patch_size, depth[0], depth_tr[0], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key)
         self.downsampler_0 = DownSampler(self.dim, self.dim*2)
 
+        self.cover_downsampler_0 = DownSampler(self.dim, self.dim*2) if self.is_conceal_network else None
+        self.secret_downsampler_0 = DownSampler(self.dim, self.dim*2) if self.is_conceal_network else None
+
         self.encoderlayer_1 = CATB_Layer(self.token_dim*2, self.patch_resolution//(2**1),
-                                         num_heads[1], window_size, patch_size, depth[1], depth_tr[1], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key)
+                                         num_heads[1], window_size, patch_size, depth[1], depth_tr[1], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key,
+                                         use_vmamba=True)
         self.downsampler_1 = DownSampler(self.dim*2, self.dim*4)
+        self.cover_downsampler_1 = DownSampler(self.dim*2, self.dim*4) if self.is_conceal_network else None
+        self.secret_downsampler_1 = DownSampler(self.dim*2, self.dim*4) if self.is_conceal_network else None
 
         self.encoderlayer_2 = CATB_Layer(self.token_dim*4, self.patch_resolution//(2**2),
-                                         num_heads[2], window_size, patch_size, depth[2], depth_tr[2], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key)
+                                         num_heads[2], window_size, patch_size, depth[2], depth_tr[2], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key,
+                                         use_vmamba=True, use_secret_controller=self.is_conceal_network)
         self.downsampler_2 = DownSampler(self.dim*4, self.dim*8)
+        self.cover_downsampler_2 = DownSampler(self.dim*4, self.dim*8) if self.is_conceal_network else None
+        self.secret_downsampler_2 = DownSampler(self.dim*4, self.dim*8) if self.is_conceal_network else None
 
         self.encoderlayer_3 = CATB_Layer(self.token_dim*8, self.patch_resolution//(2**3),
-                                         num_heads[3], window_size, patch_size, depth[3], depth_tr[3], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key)
+                                         num_heads[3], window_size, patch_size, depth[3], depth_tr[3], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key,
+                                         use_secret_controller=self.is_conceal_network)
         self.downsampler_3 = DownSampler(self.dim*8, self.dim*16)
 
         # bottleneck
@@ -823,11 +1020,14 @@ class StegFormer(nn.Module):
         # decoder
         self.upsampler_0 = UpSampler(self.dim*16, self.dim*8)
         self.decoderlayer_0 = CATB_Layer(self.token_dim*16, self.patch_resolution//(2**3),
-                                         num_heads[5], window_size, patch_size, depth[5], depth_tr[4], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key)
+                                         num_heads[5], window_size, patch_size, depth[5], depth_tr[4], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key,
+                                         use_vmamba=True)
 
         self.upsampler_1 = UpSampler(self.dim*16, self.dim*4)
         self.decoderlayer_1 = CATB_Layer(self.token_dim*8, self.patch_resolution//(2**2),
-                                         num_heads[6], window_size, patch_size, depth[6], depth_tr[5], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key)
+                                         num_heads[6], window_size, patch_size, depth[6], depth_tr[5], mlp_ratio, qkv_bias, qk_scale, drop, attn_drop, drop_path, norm_layer, use_checkpoint, drop_key=drop_key,
+                                         use_vmamba=True)
+
 
         self.upsampler_2 = UpSampler(self.dim*8, self.dim*2)
         self.decoderlayer_2 = CATB_Layer(self.token_dim*4, self.patch_resolution//(2**1),
@@ -840,25 +1040,51 @@ class StegFormer(nn.Module):
         self.output_proj = nn.Conv2d(self.dim*2, output_dim, 3, 1, 1)
 
     def forward(self, x):
+        cover_img = x[:, :self.output_dim, :, :] if self.is_conceal_network else None
+        secret_img = x[:, self.output_dim:, :, :] if self.is_conceal_network else None
         x = self.embedding(x)
 
-        # encode
+        if self.is_conceal_network:
+            cover_cond0 = self.cover_embedding(cover_img)
+            secret_cond0 = self.secret_embedding(secret_img)
+        else:
+            cover_cond0 = secret_cond0 = None
+
+        # encode: high resolution keeps the original CATB for pixel-detail protection.
         conv0 = self.encoderlayer_0(x)
         pool0 = self.downsampler_0(conv0)
+        if self.is_conceal_network:
+            cover_cond1 = self.cover_downsampler_0(cover_cond0)
+            secret_cond1 = self.secret_downsampler_0(secret_cond0)
+        else:
+            cover_cond1 = secret_cond1 = None
 
+        # medium resolution adds VMamba 2-D scan for cross-window communication.
         conv1 = self.encoderlayer_1(pool0)
         pool1 = self.downsampler_1(conv1)
+        if self.is_conceal_network:
+            cover_cond2 = self.cover_downsampler_1(cover_cond1)
+            secret_cond2 = self.secret_downsampler_1(secret_cond1)
+        else:
+            cover_cond2 = secret_cond2 = None
 
-        conv2 = self.encoderlayer_2(pool1)
+        # low resolution uses the secret-aware channel controller.
+        conv2 = self.encoderlayer_2(pool1, cover_cond2, secret_cond2)
         pool2 = self.downsampler_2(conv2)
+        if self.is_conceal_network:
+            cover_cond3 = self.cover_downsampler_2(cover_cond2)
+            secret_cond3 = self.secret_downsampler_2(secret_cond2)
+        else:
+            cover_cond3 = secret_cond3 = None
 
-        conv3 = self.encoderlayer_3(pool2)
+        conv3 = self.encoderlayer_3(pool2, cover_cond3, secret_cond3)
         pool3 = self.downsampler_3(conv3)
 
-        # bottle neck
+        # bottleneck: Hybrid Mamba3-GEB plans the global secret embedding distribution.
         bottle = self.bottleneck(pool3)
 
-        # decode
+        # decode with skip connections and generate a stego residual for concealment.
+
         up0 = self.upsampler_0(bottle)
         deconv0 = torch.cat([up0, conv3], 1)
         deconv0 = self.decoderlayer_0(deconv0)
@@ -876,6 +1102,19 @@ class StegFormer(nn.Module):
         deconv3 = self.decoderlayer_3(deconv3)
 
         output = self.output_proj(deconv3)
+
+        if self.is_conceal_network:
+            output = cover_img + 0.1*torch.tanh(output)
         if self.output_act:
             output = self.output_act(output)
         return output
+
+
+class MambaStegFormer(StegFormer):
+    """Named entry point for the optimized MambaStegFormer architecture.
+
+    The implementation inherits the upgraded StegFormer backbone that includes
+    VMamba scanning, secret-aware channel control, and the hybrid Mamba3-GEB.
+    """
+
+    pass
