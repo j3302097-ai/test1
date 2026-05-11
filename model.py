@@ -227,10 +227,6 @@ class Channel_Adapter(nn.Module):
 
 
 
-@@ -204,50 +204,154 @@ class Channel_Adapter(nn.Module):
-
-
-    def __init__(self, num_channels, resolution):
     def __init__(self, num_channels, resolution):
         super().__init__()
         super().__init__()
