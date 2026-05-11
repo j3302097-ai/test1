@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import os
 import timm
 import timm.scheduler
-from model import StegFormer
+from model import MambaStegFormer as StegFormer
 from datasets import *
 from einops import rearrange
 import config
@@ -21,17 +21,17 @@ args = config.Args()
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 # 模型初始化
-if args.use_model == 'StegFormer-S':
+if args.use_model in ['StegFormer-S', 'MambaStegFormer-S']:
     encoder = StegFormer(img_resolution=args.image_size_train, input_dim=(args.num_secret+1)*3, cnn_emb_dim=8, output_dim=3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(img_resolution=args.image_size_train, input_dim=3, cnn_emb_dim=8, output_dim=args.num_secret*3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
-if args.use_model == 'StegFormer-B':
+if args.use_model in ['StegFormer-B', 'MambaStegFormer-B']:
     encoder = StegFormer(img_resolution=args.image_size_train, input_dim=(args.num_secret+1)*3, cnn_emb_dim=16, output_dim=3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(img_resolution=args.image_size_train, input_dim=3, cnn_emb_dim=16, output_dim=args.num_secret*3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
-if args.use_model == 'StegFormer-L':
+if args.use_model in ['StegFormer-L', 'MambaStegFormer-L']:
     encoder = StegFormer(img_resolution=args.image_size_train, input_dim=(args.num_secret+1)*3, cnn_emb_dim=32, output_dim=3, depth=[2, 2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(img_resolution=args.image_size_train, input_dim=3, cnn_emb_dim=32, output_dim=args.num_secret*3, depth=[2, 2, 2, 2, 2, 2, 2, 2, 2])
 
@@ -89,7 +89,7 @@ for j in range(1):
         decoder.eval()
 
         # 在验证集上测试
-        for i_batch, img in enumerate(COCO_test_multi_loader):
+        for i_batch, img in enumerate(DIV2K_multi_test_loader):
             img = img.to(args.device)
             cover = img[0:1, :, :, :]
             secret = img[1:, :, :, :]

@@ -6,21 +6,21 @@ import numpy as np
 from critic import *
 from thop import profile
 import os
-from model import StegFormer
+from model import MambaStegFormer as StegFormer
 from datasets import *
 import config
 args = config.Args()
 
 # initialization
-if args.use_model == 'StegFormer-S':
+if args.use_model in ['StegFormer-S', 'MambaStegFormer-S']:
     encoder = StegFormer(1024, input_dim=(args.num_secret+1)*3, cnn_emb_dim=8, output_dim=3)
     decoder = StegFormer(1024, input_dim=3, cnn_emb_dim=8, output_dim=args.num_secret*3)
-if args.use_model == 'StegFormer-B':
+if args.use_model in ['StegFormer-B', 'MambaStegFormer-B']:
     encoder = StegFormer(1024, input_dim=(args.num_secret+1)*3, cnn_emb_dim=16, output_dim=3,
                          drop_key=False, patch_size=2, window_size=8, output_act=None,depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(1024, input_dim=3, cnn_emb_dim=16, output_dim=args.num_secret*3,
                          drop_key=False, patch_size=2, window_size=8, output_act=None,depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
-if args.use_model == 'StegFormer-L':
+if args.use_model in ['StegFormer-L', 'MambaStegFormer-L']:
     encoder = StegFormer(1024, input_dim=(args.num_secret+1)*3, cnn_emb_dim=32, output_dim=3, depth=[2, 2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(1024, input_dim=3, cnn_emb_dim=32, output_dim=args.num_secret*3, depth=[2, 2, 2, 2, 2, 2, 2, 2, 2])
 

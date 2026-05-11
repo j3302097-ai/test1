@@ -42,7 +42,9 @@ transform_A_test_256 = A.Compose([
     ToTensorV2()
 ])
 
-DIV2K_path = "/home/whq135/dataset"
+# 从 config.Args 读取 DIV2K 数据集根目录，避免在 datasets.py 中写死机器路径。
+# 该目录下应包含 DIV2K_train_HR 和 DIV2K_valid_HR 两个子目录。
+DIV2K_path = args.DIV2K_path
 Flickr2K_path = "/home/whq135/dataset/Flickr2K"
 
 batchsize = 12

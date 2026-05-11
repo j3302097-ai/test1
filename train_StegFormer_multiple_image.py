@@ -7,7 +7,7 @@ from critic import *
 from tensorboardX import SummaryWriter
 from thop import profile
 from datasets import *
-from model import StegFormer
+from model import MambaStegFormer as StegFormer
 import os
 import timm
 import timm.scheduler
@@ -57,6 +57,16 @@ class Restrict_Loss(nn.Module):
         loss = torch.sum(0.5*(diff_one**2))/count1 + torch.sum(0.5*(diff_zero**2))/count0
         return loss
 
+
+class Residual_Gradient_Loss(nn.Module):
+    """Gradient regularization for the stego residual."""
+
+    def forward(self, stego, cover):
+        residual = stego-cover
+        grad_h = residual[:, :, 1:, :]-residual[:, :, :-1, :]
+        grad_w = residual[:, :, :, 1:]-residual[:, :, :, :-1]
+        return torch.mean(torch.abs(grad_h)) + torch.mean(torch.abs(grad_w))
+
 # 新建文件夹
 model_version_name = args.model_name
 save_path = args.path+'/checkpoint/'+model_version_name # 新建一个以模型版本名为名字的文件夹
@@ -67,17 +77,17 @@ if not os.path.exists(save_path):
 writer = SummaryWriter(f'{args.path}/tensorboard_log/{args.model_name}/')
 
 # StegFormer initiate
-if args.use_model == 'StegFormer-S':
+if args.use_model in ['StegFormer-S', 'MambaStegFormer-S']:
     encoder = StegFormer(img_resolution=args.image_size_train, input_dim=(args.num_secret+1)*3, cnn_emb_dim=8, output_dim=3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(img_resolution=args.image_size_train, input_dim=3, cnn_emb_dim=8, output_dim=args.num_secret*3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
-if args.use_model == 'StegFormer-B':
+if args.use_model in ['StegFormer-B', 'MambaStegFormer-B']:
     encoder = StegFormer(img_resolution=args.image_size_train, input_dim=(args.num_secret+1)*3, cnn_emb_dim=16, output_dim=3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(img_resolution=args.image_size_train, input_dim=3, cnn_emb_dim=16, output_dim=args.num_secret*3,
                          drop_key=False, patch_size=2, window_size=8, output_act=args.output_act, depth=[1, 1, 1, 1, 2, 1, 1, 1, 1], depth_tr=[2, 2, 2, 2, 2, 2, 2, 2])
-if args.use_model == 'StegFormer-L':
+if args.use_model in ['StegFormer-L', 'MambaStegFormer-L']:
     encoder = StegFormer(img_resolution=args.image_size_train, input_dim=(args.num_secret+1)*3, cnn_emb_dim=32, output_dim=3, depth=[2, 2, 2, 2, 2, 2, 2, 2, 2])
     decoder = StegFormer(img_resolution=args.image_size_train, input_dim=3, cnn_emb_dim=32, output_dim=args.num_secret*3, depth=[2, 2, 2, 2, 2, 2, 2, 2, 2])
 encoder.cuda()
@@ -98,7 +108,7 @@ if args.train_next != 0:
     optim.load_state_dict(state_dicts['opt'])
 scheduler = timm.scheduler.CosineLRScheduler(optimizer=optim,
                                              t_initial=args.epochs,
-                                             lr_min=0,
+                                             lr_min=args.lr_min,
                                              warmup_t=args.warm_up_epoch,
                                              warmup_lr_init=args.warm_up_lr_init)
 
@@ -115,6 +125,7 @@ with torch.no_grad():
 conceal_loss_function = L1_Charbonnier_loss().to(args.device)
 reveal_loss_function = L1_Charbonnier_loss().to(args.device)
 restrict_loss_funtion = Restrict_Loss().to(args.device)
+residual_grad_loss_function = Residual_Gradient_Loss().to(args.device)
 
 # train
 for i_epoch in range(args.epochs):
@@ -139,14 +150,16 @@ for i_epoch in range(args.epochs):
         decode_img = decoder(encode_img_c)    # 解码图像
 
         # loss
-        conceal_loss = conceal_loss_function(cover.cuda(), encode_img.cuda())
-        reveal_loss = 2*reveal_loss_function(secret.cuda(), decode_img.cuda())
-        total_loss = None
-        if args.norm_train:
-            restrict_loss = restrict_loss_funtion(encode_img.cuda())
-            total_loss = conceal_loss + reveal_loss + restrict_loss
-        else:
-            total_loss = conceal_loss + reveal_loss
+        conceal_loss = conceal_loss_function(cover, encode_img)
+        reveal_loss = reveal_loss_function(secret, decode_img)
+        restrict_loss = restrict_loss_funtion(encode_img)
+        residual_grad_loss = residual_grad_loss_function(encode_img, cover)
+        total_loss = (
+            1.0 * conceal_loss
+            + 1.0 * reveal_loss
+            + 0.1 * restrict_loss
+            + 0.02 * residual_grad_loss
+        )
         sum_loss.append(total_loss.item())
 
         # backward
