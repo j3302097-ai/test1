@@ -10,13 +10,13 @@ class Args:
     image_size_train = 256
     image_size_test_single = 256
     image_size_test_multiple = 256
-    num_secret = 4
+    num_secret = 1
 
     # optimer config
-    lr = 1e-3
-    lr_min = 1e-6
-    warm_up_epoch = 0
-    warm_up_lr_init = 1e-6
+    lr = 2e-4
+    lr_min = 0
+    warm_up_epoch = 20
+    warm_up_lr_init = 5e-6
 
     # dataset
     DIV2K_path = '/home/gsjsun24/StegFormer-master/StegFormer-master/Data'
